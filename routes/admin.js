@@ -91,41 +91,51 @@ router.post("/create", function (req, res) {
     }
   );
 });
+
+
+
 router.post("/follow", async (req, res) => {
   try {
-    const { db, domain } = req.app.get;
+    const db = req.app.get("db");
     const { acct, apiKey: apikey, wantToFollow } = req.body;
-    const [nameSend, domainSend] = acct.split("@");
-    const targetdomain = wantToFollow.split("@")[1];
 
-    const stmt = db.prepare("SELECT apikey FROM accounts WHERE name = ?");
-    const result = stmt.get(acct);
+    // Convert http:// to https:// for database lookups
+    const dbAcct = acct.replace('http://', 'https://');
+    const dbWantToFollow = wantToFollow.replace('http://', 'https://');
 
+    const urlParts = new URL(acct);
+    const apiDomain = urlParts.hostname; // domain without http:// or https://
+    const apiAcct = urlParts.pathname.split('/').pop(); 
+
+     let result = db
+      .prepare("select apikey from accounts where name = ?")
+      .get(`${apiAcct}@${apiDomain}`);
     if (!result || result.apikey !== apikey) {
       return res.status(403).json({ msg: "Wrong API key" });
     }
 
-    const webfingerUrl = `http://${targetdomain}/.well-known/webfinger?resource=acct:${wantToFollow}`;
-    const {
-      data: { links },
-    } = await axios.get(webfingerUrl);
-    const actorUrl = links.find((link) => link.rel === "self").href;
-    const inboxUrl = `${actorUrl}/inbox`;
+    // Directly use the provided URLs for actor and object
+    const actorUrl = acct; // The follower
+    const objectUrl = wantToFollow; // The person they want to follow
+
+    const inboxUrl = `${objectUrl}/inbox`;
 
     const followActivity = {
       "@context": "https://www.w3.org/ns/activitystreams",
       type: "Follow",
-      actor: `http://${domain}/u/${nameSend}`,
-      object: actorUrl,
+      actor: actorUrl,
+      object: objectUrl,
     };
 
+    const targetdomain = new URL(objectUrl).hostname;
     const inboxFragment = inboxUrl.replace(`https://${targetdomain}`, "");
+
     const privkeyQuery = db
       .prepare("select privkey from accounts where name = ?")
-      .get(`${nameSend}@${domainSend}`);
+      .get(`${apiAcct}@${apiDomain}`);
 
     if (!privkeyQuery) {
-      console.log(`No record found for ${nameSend}.`);
+      console.log(`No record found for ${dbAcct}.`);
       return;
     }
 
@@ -143,7 +153,11 @@ router.post("/follow", async (req, res) => {
 
     const signature = signer.sign(privkey);
     const signature_b64 = signature.toString("base64");
-    const header = `keyId="https://${domainSend}/u/${nameSend}",headers="(request-target) host date digest",signature="${signature_b64}"`;
+    const header = `keyId="${actorUrl}",headers="(request-target) host date digest",signature="${signature_b64}"`;
+
+    console.log("Sending follow request to", inboxUrl);
+    console.log("Signature:", header);
+    console.log("Host:", targetdomain);
 
     request(
       {
@@ -166,12 +180,13 @@ router.post("/follow", async (req, res) => {
         }
       }
     );
-
+      console.log(res)
     res.status(200).json({ msg: "Follow initiated" });
   } catch (error) {
     console.error(error);
     res.status(500).json({ msg: "Internal Server Error" });
   }
 });
+
 
 module.exports = router;
